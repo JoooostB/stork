@@ -37,8 +37,10 @@ import (
 )
 
 const (
-	resyncPeriod                     = 30 * time.Second
-	storkMigrationReplicasAnnotation = "stork.openstorage.org/migrationReplicas"
+	resyncPeriod = 30 * time.Second
+	// StorkMigrationReplicasAnnotation is the annotation used to keep track of
+	// the number of replicas for an application when it was migrated
+	StorkMigrationReplicasAnnotation = "stork.libopenstorage.org/migrationReplicas"
 )
 
 // MigrationController migrationcontroller
@@ -897,7 +899,7 @@ func (m *MigrationController) prepareApplicationResource(
 		return nil, err
 	}
 
-	annotations[storkMigrationReplicasAnnotation] = strconv.FormatInt(replicas, 10)
+	annotations[StorkMigrationReplicasAnnotation] = strconv.FormatInt(replicas, 10)
 	spec["replicas"] = 0
 	return object, nil
 }
