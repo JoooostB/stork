@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	version "github.com/hashicorp/go-version"
 	crdv1 "github.com/kubernetes-incubator/external-storage/snapshot/pkg/apis/crd/v1"
 	"github.com/libopenstorage/stork/drivers/volume"
 	"github.com/libopenstorage/stork/pkg/apis/stork"
@@ -92,11 +93,32 @@ func (m *GroupSnapshotController) Handle(ctx context.Context, event sdk.Event) e
 		groupSnapshot = o
 
 		minVer, present := m.minResourceVersions[string(groupSnapshot.UID)]
-		if present && groupSnapshot.ResourceVersion < minVer {
-			log.GroupSnapshotLog(groupSnapshot).Infof(
-				"Already processed groupSnapshot version (%s) higher than: %s. Skipping event.",
-				minVer, groupSnapshot.ResourceVersion)
-			return nil
+		if present {
+			minVersion, err := version.NewVersion(minVer)
+			if err != nil {
+				log.GroupSnapshotLog(groupSnapshot).Errorf("Error handling event: %v err: %v", event, err.Error())
+				m.Recorder.Event(groupSnapshot,
+					v1.EventTypeWarning,
+					string(stork_api.GroupSnapshotFailed),
+					err.Error())
+				return err
+			}
+
+			snapVersion, err := version.NewVersion(groupSnapshot.ResourceVersion)
+			if err != nil {
+				log.GroupSnapshotLog(groupSnapshot).Errorf("Error handling event: %v err: %v", event, err.Error())
+				m.Recorder.Event(groupSnapshot,
+					v1.EventTypeWarning,
+					string(stork_api.GroupSnapshotFailed),
+					err.Error())
+			}
+
+			if snapVersion.LessThan(minVersion) {
+				log.GroupSnapshotLog(groupSnapshot).Infof(
+					"Already processed groupSnapshot version (%s) higher than: %s. Skipping event.",
+					minVer, groupSnapshot.ResourceVersion)
+				return nil
+			}
 		}
 
 		if event.Deleted {
@@ -305,8 +327,14 @@ func (m *GroupSnapshotController) handleSnap(groupSnap *stork_api.GroupVolumeSna
 		return !updateCRD, err
 	}
 
-	if isAnySnapshotFailed(response.Snapshots) {
-		log.GroupSnapshotLog(groupSnap).Infof("Some snapshots in group have failed")
+	if isFailed, failedTasks := isAnySnapshotFailed(response.Snapshots); isFailed {
+		err = fmt.Errorf("Some snapshots in group have failed: %s."+
+			" Resetting group snapshot to retry.", failedTasks)
+		log.GroupSnapshotLog(groupSnap).Errorf(err.Error())
+		m.Recorder.Event(groupSnap,
+			v1.EventTypeWarning,
+			string(stork_api.GroupSnapshotFailed),
+			err.Error())
 		response.Snapshots = nil // so that snapshots are retried
 		stage = stork_api.GroupSnapshotStageSnapshot
 		status = stork_api.GroupSnapshotPending
@@ -556,22 +584,21 @@ func (m *GroupSnapshotController) handleDelete(groupSnap *stork_api.GroupVolumeS
 	return nil
 }
 
-// isAnySnapshotFailed checks if any of the given snapshots is in error state
-func isAnySnapshotFailed(snapshots []*stork_api.VolumeSnapshotStatus) bool {
-	failed := false
-
+// isAnySnapshotFailed checks if any of the given snapshots is in error state and returns
+// task IDs of failed snapshots
+func isAnySnapshotFailed(snapshots []*stork_api.VolumeSnapshotStatus) (bool, []string) {
+	failedTasks := make([]string, 0)
 	for _, snapshot := range snapshots {
 		conditions := snapshot.Conditions
 		if len(conditions) > 0 {
 			lastCondition := conditions[0]
 			if lastCondition.Status == v1.ConditionTrue && lastCondition.Type == crdv1.VolumeSnapshotConditionError {
-				failed = true
-				break
+				failedTasks = append(failedTasks, snapshot.TaskID)
 			}
 		}
 	}
 
-	return failed
+	return len(failedTasks) > 0, failedTasks
 }
 
 func areAllSnapshotsStarted(snapshots []*stork_api.VolumeSnapshotStatus) bool {
